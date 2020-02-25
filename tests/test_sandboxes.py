@@ -5,10 +5,10 @@ from unittest.mock import ANY
 import docker.errors
 import pytest
 
-from epicbox import config, utils
-from epicbox.exceptions import DockerError
-from epicbox.sandboxes import (create, destroy, run, start, working_directory,
-                               _write_files)
+from epicboxie import config, utils
+from epicboxie.exceptions import DockerError
+from epicboxie.sandboxes import (create, destroy, run, run_interactive, Communication, working_directory,
+                                 _write_files)
 from .utils import is_docker_swarm, get_swarm_nodes
 
 
@@ -44,7 +44,9 @@ def test_start_no_stdin_data(profile):
     command = 'echo "stdout data" && echo "stderr data" >&2'
     sandbox = create(profile.name, command)
 
-    result = start(sandbox)
+    with Communication(sandbox) as communication:
+        communication.docker_interaction.interact()
+    result = communication.results
 
     expected_result = {
         'exit_code': 0,
@@ -61,7 +63,9 @@ def test_start_no_stdin_data(profile):
 def test_start_with_stdin_data_bytes(profile):
     sandbox = create(profile.name, 'cat')
 
-    result = start(sandbox, stdin=b'stdin data\n')
+    with Communication(sandbox) as communication:
+        communication.docker_interaction.interact(stdin=b'stdin data\n')
+    result = communication.results
 
     expected_result = {
         'exit_code': 0,
@@ -78,7 +82,9 @@ def test_start_with_stdin_data_bytes(profile):
 def test_start_with_stdin_data_str(profile):
     sandbox = create(profile.name, 'cat')
 
-    result = start(sandbox, stdin="stdin data\n")
+    with Communication(sandbox) as communication:
+        communication.docker_interaction.interact(stdin=b'stdin data\n')
+    result = communication.results
 
     expected_result = {
         'exit_code': 0,
@@ -103,17 +109,25 @@ def test_start_same_sandbox_multiple_times(profile):
         'oom_killed': False,
     }
 
-    result = start(sandbox)
+    with Communication(sandbox) as communication:
+        communication.docker_interaction.interact(timeout=sandbox.realtime_limit)
+    result = communication.results
     assert result == expected_result
 
-    result = start(sandbox, stdin=b'stdin data')
+    with Communication(sandbox) as communication:
+        communication.docker_interaction.interact(stdin=b'stdin data')
+    result = communication.results
     assert result == dict(expected_result, stdout=b'stdin data')
 
     long_data = b'stdin long data' + b'a b c d e\n' * 100000
-    result = start(sandbox, stdin=long_data)
+    with Communication(sandbox) as communication:
+        communication.docker_interaction.interact(stdin=long_data)
+    result = communication.results
     assert result == dict(expected_result, stdout=long_data)
 
-    result = start(sandbox)
+    with Communication(sandbox) as communication:
+        communication.docker_interaction.interact()
+    result = communication.results
     assert result == expected_result
 
 
@@ -129,7 +143,9 @@ def test_destroy_not_started(profile, docker_client):
 
 def test_destroy_exited(profile, docker_client):
     sandbox = create(profile.name, 'true')
-    result = start(sandbox)
+    with Communication(sandbox) as communication:
+        communication.docker_interaction.interact()
+    result = communication.results
     assert result['exit_code'] == 0
     assert docker_client.containers.get(sandbox.container.id)
 
@@ -141,7 +157,9 @@ def test_destroy_exited(profile, docker_client):
 
 def test_destroy_running(profile, docker_client):
     sandbox = create(profile.name, 'sleep 10', limits={'realtime': 1})
-    result = start(sandbox)
+    with Communication(sandbox) as communication:
+        communication.docker_interaction.interact()
+    result = communication.results
     assert result['timeout'] is True
     container = docker_client.containers.get(sandbox.container.id)
     assert container.status == 'running'
@@ -154,10 +172,14 @@ def test_destroy_running(profile, docker_client):
 
 def test_create_start_destroy_with_context_manager(profile, docker_client):
     with create(profile.name, 'cat') as sandbox:
-        result = start(sandbox)
+        with Communication(sandbox) as communication:
+            communication.docker_interaction.interact()
+        result = communication.results
         assert result['stdout'] == b''
 
-        result = start(sandbox, stdin=b'stdin data')
+        with Communication(sandbox) as communication:
+            communication.docker_interaction.interact(stdin=b'stdin data')
+        result = communication.results
         assert result['stdout'] == b'stdin data'
 
     with pytest.raises(docker.errors.NotFound):
@@ -227,7 +249,7 @@ def test_run_cpu_timeout(profile):
 
 
 def test_run_memory_limit(profile):
-    result = run(profile.name, 'python3 -c "[1] * 10 ** 8"',
+    result = run(profile.name, 'python3 -c "[1] * 10 ** 6"',
                  limits={'cputime': 10, 'memory': 8})
 
     assert result['oom_killed'] is True
@@ -338,7 +360,7 @@ def test_run_reuse_workdir(profile, docker_client):
 
 def test_working_directory(docker_client):
     with working_directory() as workdir:
-        assert workdir.volume.startswith('epicbox-')
+        assert workdir.volume.startswith('epicboxie-')
         node_volume = workdir.volume
         if is_docker_swarm(docker_client):
             node_name = get_swarm_nodes(docker_client)[0]

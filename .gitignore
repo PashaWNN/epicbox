@@ -54,3 +54,9 @@ docs/_build/
 target/
 
 .idea/*
+
+# Playground for quick tests
+playground*
+
+# Python virtual environment
+venv

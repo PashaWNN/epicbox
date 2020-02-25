@@ -1,5 +1,68 @@
+# Epicboxie
+
+Forked from [StepicOrg/epicbox](https://github.com/StepicOrg/) for some improvements.
+
+This fork allows to expose container ports with host machine and to work with sandbox interactively.
+
+`epicboxie.run_interactive` is a context manager that runs sandbox:
+
+```python
+import time
+import requests
+import epicboxie
+
+epicboxie.configure(
+    profiles=[
+        epicboxie.Profile('python', 'python:3.6.5-alpine')
+    ]
+)
+
+with open('server.py', 'rb') as f:
+    contents = f.read()
+files = [{'name': 'main.py', 'content': contents}]
+limits = {'cputime': 1, 'memory': 64}
+ports = {8000: 8000}
+
+with epicboxie.run_interactive('python', 'python3 main.py', files=files, limits=limits, ports=ports) as run:
+    time.sleep(2)
+    print(requests.get('http://localhost:8000').status_code)
+
+result = run.results
+```
+
+The `ports` parameter is also added to old `run` function.
+
+Interaction with standard I/O is done with `run.docker_interaction.read_sock()` and `run.docker_interaction.write_sock()`:
+
+```python
+import time
+import requests
+import epicboxie
+
+epicboxie.configure(
+    profiles=[
+        epicboxie.Profile('python', 'python:3.6.5-alpine')
+    ]
+)
+files = [{'name': 'main.py', 'content': b'print(input("Input data: ")[::-1])'}]
+limits = {'cputime': 1, 'memory': 64}
+ports = {8000: 8000}
+
+with epicboxie.run_interactive('python', 'python3 main.py', files=files, limits=limits, ports=ports) as run:
+    time.sleep(0.5)
+    prompt = run.docker_interaction.read_sock()[0].decode('utf8')  # read_sock returns tuple (stdout, stderr)
+    run.docker_interaction.write_sock(input(prompt).encode())
+    time.sleep(0.5)
+    print(run.docker_interaction.read_sock()[0].decode('utf8'))
+
+result = run.results
+```
+
+If you need to use old-style automatic interaction (pass whole stdin and wait for termination) when using `run_interactive`, you can use `run.docker_interaction.interact(stdin, timeout, close=True)`
+
+# Original README.md:
 # epicbox
-[![Build Status](https://travis-ci.org/StepicOrg/epicbox.svg?branch=master)](https://travis-ci.org/StepicOrg/epicbox)
+[![Build Status](https://travis-ci.org/PashaWNN/epicbox.svg?branch=master)](https://travis-ci.org/PashaWNN/epicbox)
 
 A Python library to run untrusted code in secure, isolated [Docker](https://www.docker.com/)
 based sandboxes. It is used to automatically grade programming assignments
@@ -16,11 +79,11 @@ and limit the CPU, memory, disk, and network usage for the running process.
 Run a simple Python script in a one-time Docker container using the
 [`python:3.6.5-alpine`](https://hub.docker.com/_/python/) image:
 ```python
-import epicbox
+import epicboxie
 
-epicbox.configure(
+epicboxie.configure(
     profiles=[
-        epicbox.Profile('python', 'python:3.6.5-alpine')
+        epicboxie.Profile('python', 'python:3.6.5-alpine')
     ]
 )
 files = [{'name': 'main.py', 'content': b'print(42)'}]
@@ -63,22 +126,22 @@ run it multiple times on different input data.  In this example `epicbox` will
 run containers on a dedicated [Docker Swarm](https://docs.docker.com/swarm/overview/)
 cluster instead of locally installed Docker engine:
 ```python
-import epicbox
+import epicboxie
 
 PROFILES = {
     'gcc_compile': {
-        'docker_image': 'stepik/epicbox-gcc:6.3.0',
+        'docker_image': 'stepik/epicboxie-gcc:6.3.0',
         'user': 'root',
     },
     'gcc_run': {
-        'docker_image': 'stepik/epicbox-gcc:6.3.0',
+        'docker_image': 'stepik/epicboxie-gcc:6.3.0',
         # It's safer to run untrusted code as a non-root user (even in a container)
         'user': 'sandbox',
         'read_only': True,
         'network_disabled': False,
     },
 }
-epicbox.configure(profiles=PROFILES, docker_url='tcp://1.2.3.4:2375')
+epicboxie.configure(profiles=PROFILES, docker_url='tcp://1.2.3.4:2375')
 
 untrusted_code = b"""
 // C++ program
@@ -92,15 +155,15 @@ int main() {
 """
 # A working directory allows to preserve files created in a one-time container
 # and access them from another one. Internally it is a temporary Docker volume.
-with epicbox.working_directory() as workdir:
-    epicbox.run('gcc_compile', 'g++ -pipe -O2 -static -o main main.cpp',
+with epicboxie.working_directory() as workdir:
+    epicboxie.run('gcc_compile', 'g++ -pipe -O2 -static -o main main.cpp',
                 files=[{'name': 'main.cpp', 'content': untrusted_code}],
                 workdir=workdir)
-    epicbox.run('gcc_run', './main', stdin='2 2',
+    epicboxie.run('gcc_run', './main', stdin='2 2',
                 limits={'cputime': 1, 'memory': 64},
                 workdir=workdir)
     # {'exit_code': 0, 'stdout': b'4\n', 'stderr': b'', 'duration': 0.095318, 'timeout': False, 'oom_killed': False}
-    epicbox.run('gcc_run', './main', stdin='14 5',
+    epicboxie.run('gcc_run', './main', stdin='14 5',
                 limits={'cputime': 1, 'memory': 64},
                 workdir=workdir)
     # {'exit_code': 0, 'stdout': b'19\n', 'stderr': b'', 'duration': 0.10285, 'timeout': False, 'oom_killed': False}

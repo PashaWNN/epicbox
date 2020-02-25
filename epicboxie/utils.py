@@ -147,95 +147,138 @@ def _socket_write(sock, data):
         raise e
 
 
-def docker_communicate(container, stdin=None, start_container=True,
-                       timeout=None):
-    """
-    Interact with the container: Start it if required. Send data to stdin.
-    Read data from stdout and stderr, until end-of-file is reached.
+class DockerInteraction:
+    def __init__(self, container, start_container=True, default_timeout=None):
+        """
+        Context manager for interaction with docker container
 
-    :param Container container: A container to interact with.
-    :param bytes stdin: The data to be sent to the standard input of the
-                        container, or `None`, if no data should be sent.
-    :param bool start_container: Whether to start the container after
-                                 attaching to it.
-    :param int timeout: Time in seconds to wait for the container to terminate,
-        or `None` to make it unlimited.
+        :param container: docker container to interact with
+        :param start_container: whether to start container if needed or not
+        :default timeout: default timeout for `interact` method if not provided
+        """
+        self.container = container
+        self.default_timeout = default_timeout
+        docker_client = get_docker_client(retry_status_forcelist=(404, 500))
+        self.log = logger.bind(container=container)
+        params = {
+            # Attach to stdin even if there is nothing to send to it to be able
+            # to properly close it (stdin of the container is always open).
+            'stdin': 1,
+            'stdout': 1,
+            'stderr': 1,
+            'stream': 1,
+            'logs': 0,
+        }
+        self.sock = docker_client.api.attach_socket(container.id, params=params)
+        # noinspection PyProtectedMember
+        self.sock._sock.setblocking(False)  # Make socket non-blocking
+        self.log.info("Attached to the container", params=params, fd=self.sock.fileno())
+        if start_container:
+            container.start()
+            self.log.info("Container started")
 
-    :return: A tuple `(stdout, stderr)` of bytes objects.
+        self.stream_data = b''
 
-    :raise TimeoutError: If the container does not terminate after `timeout`
-                         seconds. The container is not killed automatically.
-    :raise RequestException, DockerException, OSError: If an error occurred
-        with the underlying docker system.
-    """
-    # Retry on 'No such container' since it may happen when the attach/start
-    # is called immediately after the container is created.
-    docker_client = get_docker_client(retry_status_forcelist=(404, 500))
-    log = logger.bind(container=container)
-    params = {
-        # Attach to stdin even if there is nothing to send to it to be able
-        # to properly close it (stdin of the container is always open).
-        'stdin': 1,
-        'stdout': 1,
-        'stderr': 1,
-        'stream': 1,
-        'logs': 0,
-    }
-    sock = docker_client.api.attach_socket(container.id, params=params)
-    sock._sock.setblocking(False)  # Make socket non-blocking
-    log.info("Attached to the container", params=params, fd=sock.fileno(),
-             timeout=timeout)
-    if not stdin:
-        log.debug("There is no input data. Shut down the write half "
-                  "of the socket.")
-        sock._sock.shutdown(socket.SHUT_WR)
-    if start_container:
-        container.start()
-        log.info("Container started")
+    @property
+    def _readiness(self):
+        read_ready, write_ready, _ = select.select([self.sock], [self.sock], [], 1)
+        return read_ready, write_ready
 
-    stream_data = b''
-    start_time = time.time()
-    while timeout is None or time.time() - start_time < timeout:
-        read_ready, write_ready, _ = select.select([sock], [sock], [], 1)
-        is_io_active = False
-        if read_ready:
-            is_io_active = True
-            try:
-                data = _socket_read(sock)
-            except ConnectionResetError:
-                log.warning("Connection reset caught on reading the container "
-                            "output stream. Break communication")
-                break
-            if data is None:
-                log.debug("Container output reached EOF. Closing the socket")
-                break
-            stream_data += data
+    @property
+    def write_ready(self):
+        return self._readiness[1]
 
-        if write_ready and stdin:
-            is_io_active = True
-            try:
-                written = _socket_write(sock, stdin)
-            except BrokenPipeError:
-                # Broken pipe may happen when a container terminates quickly
-                # (e.g. OOM Killer) and docker manages to close the socket
-                # almost immediately before we're trying to write to stdin.
-                log.warning("Broken pipe caught on writing to stdin. Break "
-                            "communication")
-                break
-            stdin = stdin[written:]
-            if not stdin:
-                log.debug("All input data has been sent. Shut down the write "
-                          "half of the socket.")
-                sock._sock.shutdown(socket.SHUT_WR)
+    @property
+    def output_streams(self):
+        """
+        Tuple (stdout, stderr)
+        """
+        return demultiplex_docker_stream(self.stream_data)
 
-        if not is_io_active:
-            # Save CPU time
-            time.sleep(0.05)
-    else:
-        sock.close()
-        raise TimeoutError("Container didn't terminate after timeout seconds")
-    sock.close()
-    return demultiplex_docker_stream(stream_data)
+    def read_sock(self):
+        """
+        Try to read new data if available. Also appends read data to self.stream_data
+
+        :return new data if available else None
+        """
+        try:
+            if self._readiness[0]:
+                data = _socket_read(self.sock)
+                self.stream_data += data
+                return demultiplex_docker_stream(data)
+            else:
+                return None
+        except ConnectionResetError:
+            self.log.warning("Connection reset caught on reading the container "
+                             "output stream. Break communication")
+
+    def write_sock(self, stdin):
+        return _socket_write(self.sock, stdin)
+
+    def interact(self, stdin=None, timeout=None, close=True):
+        """
+        Old-style container interaction, like a regular `epicbox.run` method
+
+        :param stdin: bytes-like object to be streamed into standard input
+        :param timeout: timeout for waiting container
+        :param close: whether to close socket (and terminate container) when completed or not
+        """
+        if isinstance(stdin, str):
+            stdin = stdin.encode()
+        if not stdin:
+            self.log.debug("There is no input data. Shut down the write half "
+                           "of the socket.")
+            # noinspection PyProtectedMember
+            self.sock._sock.shutdown(socket.SHUT_WR)
+        timeout = timeout or self.default_timeout
+        start_time = time.time()
+        while timeout is None or time.time() - start_time < timeout:
+            read_ready, write_ready = self._readiness
+            is_io_active = False
+            if read_ready:
+                is_io_active = True
+                try:
+                    data = _socket_read(self.sock)
+                except ConnectionResetError:
+                    self.log.warning("Connection reset caught on reading the container "
+                                     "output stream. Break communication")
+                    break
+                if data is None:
+                    self.log.debug("Container output reached EOF. Closing the socket")
+                    break
+                self.stream_data += data
+
+            if write_ready and stdin:
+                is_io_active = True
+                try:
+                    written = _socket_write(self.sock, stdin)
+                except BrokenPipeError:
+                    # Broken pipe may happen when a container terminates quickly
+                    # (e.g. OOM Killer) and docker manages to close the socket
+                    # almost immediately before we're trying to write to stdin.
+                    self.log.warning("Broken pipe caught on writing to stdin. Break "
+                                     "communication")
+                    break
+                stdin = stdin[written:]
+                if not stdin:
+                    self.log.debug("All input data has been sent. Shut down the write "
+                                   "half of the socket.")
+                    # noinspection PyProtectedMember
+                    self.sock._sock.shutdown(socket.SHUT_WR)
+
+            if not is_io_active:
+                # Save CPU time
+                time.sleep(0.05)
+        else:
+            if close:
+                self.sock.close()
+            raise TimeoutError("Container didn't terminate after timeout seconds")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.sock.close()
 
 
 def filter_filenames(files):

@@ -3,9 +3,9 @@ import uuid
 
 import pytest
 
-import epicbox
-from epicbox import config as epicbox_config, sandboxes
-from epicbox.utils import get_docker_client
+import epicboxie
+from epicboxie import config as epicbox_config, sandboxes
+from epicboxie.utils import get_docker_client
 
 
 def pytest_addoption(parser):
@@ -30,28 +30,28 @@ def docker_image():
 
 @pytest.fixture(scope='session')
 def profile(docker_image):
-    return epicbox.Profile('python', docker_image,
-                           command='python3 -c \'print("profile stdout")\'')
+    return epicboxie.Profile('python', docker_image,
+                             command='python3 -c \'print("profile stdout")\'')
 
 
 @pytest.fixture(scope='session')
 def profile_read_only(docker_image):
-    return epicbox.Profile('python_read_only', docker_image,
-                           command='python3 -c \'print("profile stdout")\'',
-                           read_only=True)
+    return epicboxie.Profile('python_read_only', docker_image,
+                             command='python3 -c \'print("profile stdout")\'',
+                             read_only=True)
 
 
 @pytest.fixture(scope='session')
 def profile_unknown_image():
-    return epicbox.Profile('unknown_image', 'unknown_image:tag',
-                           command='unknown')
+    return epicboxie.Profile('unknown_image', 'unknown_image:tag',
+                             command='unknown')
 
 
 @pytest.fixture(scope='session', autouse=True)
 def configure(profile, profile_read_only, profile_unknown_image, docker_url):
-    epicbox.configure(profiles=[profile, profile_read_only,
-                                profile_unknown_image],
-                      docker_url=docker_url)
+    epicboxie.configure(profiles=[profile, profile_read_only,
+                                  profile_unknown_image],
+                        docker_url=docker_url)
     # Standard logging to console
     console = logging.StreamHandler()
     logging.getLogger().addHandler(console)

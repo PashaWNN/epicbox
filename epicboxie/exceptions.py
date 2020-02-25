@@ -1,5 +1,5 @@
 class EpicBoxError(Exception):
-    """The base class for custom exceptions raised by epicbox."""
+    """The base class for custom exceptions raised by epicboxie."""
 
 
 class DockerError(EpicBoxError):

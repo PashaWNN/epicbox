@@ -10,11 +10,11 @@ from requests.exceptions import RequestException
 
 from . import config, exceptions, utils
 
-__all__ = ['create', 'start', 'destroy', 'run', 'working_directory']
+__all__ = ['create', 'Communication', 'destroy', 'run', 'run_interactive', 'working_directory']
 
 logger = structlog.get_logger()
 
-_SANDBOX_NAME_PREFIX = 'epicbox-'
+_SANDBOX_NAME_PREFIX = 'epicboxie-'
 
 
 class Sandbox:
@@ -40,7 +40,7 @@ class Sandbox:
                                                    self.container.short_id)
 
 
-def create(profile_name, command=None, files=None, limits=None, workdir=None):
+def create(profile_name, command=None, files=None, limits=None, workdir=None, ports=None):
     """Create a new sandbox container without starting it.
 
     :param str profile_name: One of configured profile names.
@@ -52,6 +52,7 @@ def create(profile_name, command=None, files=None, limits=None, workdir=None):
         process.  It overrides the default limits from `config.DEFAULT_LIMITS`.
     :param workdir: A working directory created using `working_directory`
                     context manager.
+    :param dict ports: Specify ports to be exposed from the sandboxed process.
     :return Sandbox: A :class:`Sandbox` object.
 
     :raises DockerError: If an error occurred with the underlying
@@ -71,7 +72,8 @@ def create(profile_name, command=None, files=None, limits=None, workdir=None):
                                   command_list, limits,
                                   workdir=workdir, user=profile.user,
                                   read_only=profile.read_only,
-                                  network_disabled=profile.network_disabled)
+                                  network_disabled=profile.network_disabled,
+                                  ports=ports)
     if workdir and not workdir.node:
         node_name = utils.inspect_container_node(c)
         if node_name:
@@ -89,7 +91,7 @@ def create(profile_name, command=None, files=None, limits=None, workdir=None):
 
 def _create_sandbox_container(sandbox_id, image, command, limits, workdir=None,
                               user=None, read_only=False,
-                              network_disabled=True):
+                              network_disabled=True, ports=None):
     name = _SANDBOX_NAME_PREFIX + sandbox_id
     mem_limit = str(limits['memory']) + 'm'
     volumes = {
@@ -120,6 +122,7 @@ def _create_sandbox_container(sandbox_id, image, command, limits, workdir=None,
                                             name=name,
                                             working_dir=config.DOCKER_WORKDIR,
                                             volumes=volumes,
+                                            ports=ports,
                                             read_only=read_only,
                                             mem_limit=mem_limit,
                                             # Prevent from using any swap
@@ -142,54 +145,59 @@ def _create_sandbox_container(sandbox_id, image, command, limits, workdir=None,
     return c
 
 
-def start(sandbox, stdin=None):
-    """Start a created sandbox container and wait for it to terminate.
+class Communication:
+    def __init__(self, sandbox):
+        self.exited = False
+        self.sandbox = sandbox
+        self.exit_code = None
+        self.duration = None
+        self.timeout = False
+        self.oom_killed = None
+        self.stdout = b''
+        self.stderr = b''
+        self.log = logger.bind(sandbox=sandbox)
+        self.log.info("Starting the sandbox")
+        self.docker_interaction = utils.DockerInteraction(sandbox.container, default_timeout=sandbox.realtime_limit)
 
-    :param Sandbox sandbox: A sandbox to start.
-    :param bytes or str stdin: The data to be sent to the standard input of the
-        sandbox, or `None`, if no data should be sent.
+    @property
+    def results(self):
+        if not self.exited:
+            raise ValueError('Communication is not done yet')
+        return {
+            'oom_killed': self.oom_killed,
+            'duration': self.duration,
+            'stdout': self.stdout,
+            'stderr': self.stderr,
+            'timeout': self.timeout,
+            'exit_code': self.exit_code
+        }
 
-    :return dict: A result structure containing the exit code of the sandbox,
-        its stdout and stderr output, duration of execution, etc.
+    def __enter__(self):
+        self.docker_interaction.__enter__()
+        return self
 
-    :raises DockerError: If an error occurred with the underlying
-                         docker system.
-    """
-    if stdin:
-        if not isinstance(stdin, (bytes, str)):
-            raise TypeError("'stdin' must be bytes or str")
-        if isinstance(stdin, str):
-            stdin = stdin.encode()
-    log = logger.bind(sandbox=sandbox)
-    log.info("Starting the sandbox", stdin_size=len(stdin or ''))
-    result = {
-        'exit_code': None,
-        'stdout': b'',
-        'stderr': b'',
-        'duration': None,
-        'timeout': False,
-        'oom_killed': False,
-    }
-    try:
-        stdout, stderr = utils.docker_communicate(
-            sandbox.container, stdin=stdin, timeout=sandbox.realtime_limit)
-    except TimeoutError:
-        log.info("Sandbox realtime limit exceeded",
-                 limit=sandbox.realtime_limit)
-        result['timeout'] = True
-    except (RequestException, DockerException, OSError) as e:
-        log.exception("Sandbox runtime error")
-        raise exceptions.DockerError(str(e))
-    else:
-        log.info("Sandbox container exited")
-        state = utils.inspect_exited_container_state(sandbox.container)
-        result.update(stdout=stdout, stderr=stderr, **state)
-        if (utils.is_killed_by_sigkill_or_sigxcpu(state['exit_code']) and
-                not state['oom_killed']):
-            # SIGKILL/SIGXCPU is sent but not by out of memory killer
-            result['timeout'] = True
-    log.info("Sandbox run result", result=utils.truncate_result(result))
-    return result
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.docker_interaction.__exit__(None, None, None)
+        if exc_type is TimeoutError:
+            self.log.info("Sandbox realtime limit exceeded",
+                     limit=self.sandbox.realtime_limit)
+            self.timeout = True
+            self.exited = True
+            return True
+        elif exc_type in (RequestException, DockerException, OSError):
+            self.log.exception("Sandbox runtime error")
+            self.exited = True
+            raise exceptions.DockerError(exc_val)
+        elif exc_type is None:
+            self.log.info("Sandbox container exited")
+            state = utils.inspect_exited_container_state(self.sandbox.container)
+            self.oom_killed, self.duration, self.exit_code = state['oom_killed'], state['duration'], state['exit_code']
+            self.stdout, self.stderr = self.docker_interaction.output_streams
+            if (utils.is_killed_by_sigkill_or_sigxcpu(state['exit_code']) and
+                    not state['oom_killed']):
+                # SIGKILL/SIGXCPU is sent but not by out of memory killer
+                self.timeout = True
+        self.exited = True
 
 
 def destroy(sandbox):
@@ -210,7 +218,7 @@ def destroy(sandbox):
 
 
 def run(profile_name, command=None, files=None, stdin=None, limits=None,
-        workdir=None):
+        workdir=None, ports=None):
     """Run a command in a new sandbox container and wait for it to finish
     running.  Destroy the sandbox when it has finished running.
 
@@ -223,8 +231,31 @@ def run(profile_name, command=None, files=None, stdin=None, limits=None,
                          docker system.
     """
     with create(profile_name, command=command, files=files, limits=limits,
-                workdir=workdir) as sandbox:
-        return start(sandbox, stdin=stdin)
+                workdir=workdir, ports=ports) as sandbox:
+        with Communication(sandbox) as communication:
+            communication.docker_interaction.interact(stdin, timeout=sandbox.realtime_limit, close=True)
+    return communication.results
+
+
+@contextmanager
+def run_interactive(profile_name, command=None, files=None, limits=None,
+        workdir=None, ports=None):
+    """Run a command in a new sandbox container and wait for it to finish
+    running.  Destroy the sandbox when it has finished running.
+
+    The arguments to this function is a combination of arguments passed
+    to `create` and `start` functions.
+
+    :return dict: The same as for `start`.
+
+    :raises DockerError: If an error occurred with the underlying
+                         docker system.
+    """
+    with create(profile_name, command=command, files=files, limits=limits,
+                workdir=workdir, ports=ports) as sandbox:
+        with Communication(sandbox) as communication:
+            yield communication
+        return communication.results
 
 
 class _WorkingDirectory(object):
@@ -247,7 +278,7 @@ class _WorkingDirectory(object):
 @contextmanager
 def working_directory():
     docker_client = utils.get_docker_client()
-    volume_name = 'epicbox-' + str(uuid.uuid4())
+    volume_name = 'epicboxie-' + str(uuid.uuid4())
     log = logger.bind(volume=volume_name)
     log.info("Creating new docker volume for working directory")
     try:
