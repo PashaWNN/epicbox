@@ -35,6 +35,12 @@ def profile(docker_image):
 
 
 @pytest.fixture(scope='session')
+def profile_networking(docker_image):
+    return epicboxie.Profile('python_networking', docker_image,
+                             command='python3 main.py', network_disabled=False)
+
+
+@pytest.fixture(scope='session')
 def profile_read_only(docker_image):
     return epicboxie.Profile('python_read_only', docker_image,
                              command='python3 -c \'print("profile stdout")\'',
@@ -48,9 +54,9 @@ def profile_unknown_image():
 
 
 @pytest.fixture(scope='session', autouse=True)
-def configure(profile, profile_read_only, profile_unknown_image, docker_url):
+def configure(profile, profile_read_only, profile_unknown_image, profile_networking, docker_url):
     epicboxie.configure(profiles=[profile, profile_read_only,
-                                  profile_unknown_image],
+                                  profile_unknown_image, profile_networking],
                         docker_url=docker_url)
     # Standard logging to console
     console = logging.StreamHandler()

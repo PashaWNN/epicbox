@@ -1,7 +1,7 @@
 import time
 import uuid
 from unittest.mock import ANY
-
+import requests
 import docker.errors
 import pytest
 
@@ -79,6 +79,22 @@ def test_interactive_read(profile):
         'oom_killed': False,
     }
     assert result == expected_result
+
+
+def test_open_ports(profile_networking):
+    file = b'from http.server import HTTPServer, BaseHTTPRequestHandler; ' \
+           b'HTTPServer(("", 8000), BaseHTTPRequestHandler).serve_forever()'
+    files = [{'name': 'main.py', 'content': file}]
+    limits = {'realtime': 10, 'memory': 64}
+    ports = {8000: 8000}
+    with run_interactive(profile_networking.name, 'python3 main.py', files=files, limits=limits, ports=ports) as run:
+        time.sleep(2)
+        assert requests.get('http://localhost:8000').status_code == 501
+
+    with run_interactive('python', 'python3 main.py', files=files, limits=limits, ports=None) as run:
+        time.sleep(2)
+        with pytest.raises(requests.ConnectionError):
+            requests.get('http://localhost:8000')
 
 
 def test_interactive_write(profile):
