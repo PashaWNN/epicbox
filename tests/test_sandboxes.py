@@ -60,6 +60,51 @@ def test_start_no_stdin_data(profile):
     assert result['duration'] > 0
 
 
+def test_interactive_read(profile):
+    command = 'echo "stdout data" && echo "stderr data" >&2'
+    sandbox = create(profile.name, command)
+
+    with Communication(sandbox) as communication:
+        read_data = communication.docker_interaction.read_sock()
+        assert read_data == (b'stdout data\n', b'stderr data\n')
+
+    result = communication.results
+
+    expected_result = {
+        'exit_code': 0,
+        'stdout': b'stdout data\n',
+        'stderr': b'stderr data\n',
+        'duration': ANY,
+        'timeout': False,
+        'oom_killed': False,
+    }
+    assert result == expected_result
+
+
+def test_interactive_write(profile):
+    command = 'python3 -c "print(input()[::-1])"'
+    sandbox = create(profile.name, command)
+
+    with Communication(sandbox) as communication:
+        communication.docker_interaction.write_sock(b'abcd\n')
+        time.sleep(0.2)
+        read_data = communication.docker_interaction.read_sock()
+        assert read_data == (b'dcba\n', b'')
+
+    result = communication.results
+
+    expected_result = {
+        'exit_code': 0,
+        'stdout': b'dcba\n',
+        'stderr': b'',
+        'duration': ANY,
+        'timeout': False,
+        'oom_killed': False,
+    }
+    assert result == expected_result
+    assert result['duration'] > 0
+
+
 def test_start_with_stdin_data_bytes(profile):
     sandbox = create(profile.name, 'cat')
 

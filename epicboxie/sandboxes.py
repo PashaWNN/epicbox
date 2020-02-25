@@ -180,7 +180,7 @@ class Communication:
         self.docker_interaction.__exit__(None, None, None)
         if exc_type is TimeoutError:
             self.log.info("Sandbox realtime limit exceeded",
-                     limit=self.sandbox.realtime_limit)
+                          limit=self.sandbox.realtime_limit)
             self.timeout = True
             self.exited = True
             return True
