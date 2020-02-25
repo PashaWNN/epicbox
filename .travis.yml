@@ -7,7 +7,7 @@ python:
 services:
   - docker
 before_install:
-  - docker pull stepic/epicboxie-python
+  - docker pull stepic/epicbox-python
 install:
   - pip install -r requirements/dev.txt
 script: py.test tests
